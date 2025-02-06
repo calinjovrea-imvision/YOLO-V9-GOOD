@@ -53,7 +53,16 @@ class ImageRequest(BaseModel):
     device: int = 0
     classes: list = [0]
     output_name: str = 'yolov9_detect'
+    model_name: str = ""
 
+def get_model_by_name(model_name):
+    # Check if the model name exists in the dictionary
+    if model_name in models:
+        return models[model_name]
+    else:
+        logger.error(f"Model {model_name} not found!")
+        return None
+    
 def get_cuda_memory(device_index=0):
     try:
         device_handle = nvmlDeviceGetHandleByIndex(device_index)
@@ -65,7 +74,7 @@ def get_cuda_memory(device_index=0):
 
 def run_detection(image_data, model):
     logger.info(f"Starting detection for {image_data[0]}")
-    image_path, weights_path, img_size, device, classes, output_name = image_data
+    image_path, weights_path, img_size, device, classes, output_name, model_name = image_data
 
     start_time = time.time()
 
@@ -75,8 +84,6 @@ def run_detection(image_data, model):
         save_dir.mkdir(parents=True, exist_ok=True)
 
         for path, im, im0s, _, _ in dataset:
-            print(im.shape)
-            # print(im0s.shape)
             imos_resized = cv2.resize(im0s, (640,340))
             im = torch.from_numpy(im).to(device)
             im = im.half() if model.fp16 else im.float()
@@ -88,6 +95,8 @@ def run_detection(image_data, model):
             pred = model(im)
             pred = non_max_suppression(pred, 0.25, 0.45, classes=classes)
 
+            models[model_name]['busy']= False
+
             for det in pred:
                 if len(det):
                     for *xyxy, conf, cls in reversed(det):
@@ -97,7 +106,6 @@ def run_detection(image_data, model):
 
             output_path = save_dir / f"{Path(path).stem}_detected.jpg"
             cv2.imwrite(str(output_path), imos_resized)
-            print(str(output_path))
 
         logger.info(f"Detection completed for {image_path} | {time.time()-start_time} s")
         return {'message': f'Detection completed for {image_path} | {time.time()-start_time} s'}
@@ -112,17 +120,20 @@ def process_image():
 
     def get_available_model():
         """Randomly selects an available (non-busy) model and marks it as busy."""
-        available_models = [key for key, val in models.items() if not val["busy"]]
-        
-        if not available_models:
-            logger.error("No available models!")
-            queue_length = image_queue.qsize()
-            logger.info(f"Queue Length: {queue_length}")
-            return None
-        
-        chosen_model_name = random.choice(available_models)
-        models[chosen_model_name]["busy"] = True  # Mark as busy
-        return chosen_model_name, models[chosen_model_name]["model"]
+        try:
+            available_models = [key for key, val in models.items() if not val["busy"]]
+
+            if not available_models:
+                logger.error("No available models!")
+                queue_length = image_queue.qsize()
+                logger.info(f"Queue Length: {queue_length}")
+                return "", None
+            
+            chosen_model_name = random.choice(available_models)
+            models[chosen_model_name]["busy"] = True  # Mark as busy
+            return chosen_model_name, models[chosen_model_name]["model"]
+        except Exception as e:
+            logger.error(f"ERROR: "+str(e))
     
     while True:
         try:
@@ -134,6 +145,8 @@ def process_image():
             logger.info(f"Image data: {image_data}")  # Log image data for debugging
 
             chosen_model_name, model = get_available_model()
+            image_data  += (chosen_model_name,)
+            
             if model:
                 logger.info(f"Using {chosen_model_name} in the pipeline.")
                 used, total = get_cuda_memory()
